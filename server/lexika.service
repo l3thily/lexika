@@ -1,0 +1,15 @@
+[Unit]
+Description=Лексика API (вход, прогресс, ИИ-подсказки)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/lexika/server.py
+EnvironmentFile=/etc/lexika.env
+Environment=LEXIKA_DATA=/opt/lexika/data PORT=8098
+DynamicUser=yes
+StateDirectory=lexika
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
