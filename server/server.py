@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Лексика API: вход по паролю, словари, синхронизация прогресса, ИИ-подсказки.
 
+У каждого пароля свой аккаунт и свой прогресс (STATE/progress/<uid>.json).
+Новый пароль можно создать на экране входа; владелец заводит аккаунты и с сервера:
+  echo 'пароль' | python3 server.py adduser <uid>
 Только stdlib. Слушает 127.0.0.1:8098, снаружи — nginx location /api/.
 Окружение: LEXIKA_PASS_SHA256, LEXIKA_SECRET, ANTHROPIC_API_KEY,
            LEXIKA_DATA (словари, по умолчанию /opt/lexika/data), STATE_DIRECTORY (systemd).
 """
-import hashlib, hmac, json, os, threading, time, urllib.request, urllib.error
+import hashlib, hmac, json, os, secrets, sys, threading, time, urllib.request, urllib.error
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -26,8 +29,54 @@ _cards = {}  # aspect -> {id: card}
 _hits = {}   # ip -> [timestamps]
 
 
-def token():
-    return hmac.new(SECRET, b"lexika-v1", hashlib.sha256).hexdigest()
+OWNER = "owner"
+
+
+def sign(msg):
+    return hmac.new(SECRET, msg.encode(), hashlib.sha256).hexdigest()
+
+
+def token(uid):
+    return uid + "." + sign("lexika-v2:" + uid)
+
+
+def token_uid(t):
+    """uid по токену; старый токен v1 (до аккаунтов) — это владелец."""
+    if hmac.compare_digest(t, sign("lexika-v1")):
+        return OWNER
+    uid, _, sig = t.partition(".")
+    return uid if uid and hmac.compare_digest(sig, sign("lexika-v2:" + uid)) else None
+
+
+def users_path():
+    return os.path.join(STATE, "users.json")
+
+
+def find_user(pw):
+    if PASS_SHA and hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), PASS_SHA):
+        return OWNER
+    return load_json(users_path(), {}).get(sign("pw:" + pw))
+
+
+def add_user(pw, uid=None):
+    """Возвращает uid нового аккаунта или None, если такой пароль уже занят."""
+    with lock:
+        users = load_json(users_path(), {})
+        key = sign("pw:" + pw)
+        if key in users:
+            return None
+        users[key] = uid or secrets.token_hex(6)
+        save_json(users_path(), users)
+        return users[key]
+
+
+def progress_path(uid):
+    d = os.path.join(STATE, "progress")
+    os.makedirs(d, exist_ok=True)
+    old = os.path.join(STATE, "progress.json")  # прогресс до аккаунтов — владельца
+    if uid == OWNER and os.path.exists(old) and not os.path.exists(os.path.join(d, OWNER + ".json")):
+        os.replace(old, os.path.join(d, OWNER + ".json"))
+    return os.path.join(d, uid + ".json")
 
 
 def load_json(path, default):
@@ -129,13 +178,14 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
 
     def authed(self):
+        """uid вошедшего или None."""
         if not SECRET:
-            return False
+            return None
         auth = self.headers.get("Authorization") or ""
         if auth.startswith("Bearer "):
-            return hmac.compare_digest(auth[7:].strip(), token())
+            return token_uid(auth[7:].strip())
         c = SimpleCookie(self.headers.get("Cookie") or "")
-        return COOKIE in c and hmac.compare_digest(c[COOKIE].value, token())
+        return token_uid(c[COOKIE].value) if COOKIE in c else None
 
     def ip(self):
         return self.headers.get("X-Real-IP") or self.client_address[0]
@@ -171,10 +221,11 @@ class H(BaseHTTPRequestHandler):
                 return self.wfile.write(body)
         if p == "/api/health":
             return self.send(200, {"ok": True})
-        if not self.authed():
+        uid = self.authed()
+        if not uid:
             return self.send(401, {"error": "auth"})
         if p == "/api/me":
-            return self.send(200, {"ok": True})
+            return self.send(200, {"ok": True, "uid": uid})
         if p.startswith("/api/data/") and p[10:] in ASPECTS:
             try:
                 with open(os.path.join(DATA, p[10:] + ".json"), "rb") as f:
@@ -183,7 +234,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "no data"})
         if p == "/api/progress":
             with lock:
-                return self.send(200, load_json(os.path.join(STATE, "progress.json"), {}))
+                return self.send(200, load_json(progress_path(uid), {}))
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -192,18 +243,34 @@ class H(BaseHTTPRequestHandler):
             data = self.body()
         except ValueError:
             return self.send(400, {"error": "bad body"})
-        if p == "/api/login":
+        if p in ("/api/login", "/api/register"):
+            if not SECRET:
+                return self.send(503, {"error": "Сервер не настроен"})
             if self.limited("login:" + self.ip(), 8, 600):
                 return self.send(429, {"error": "Слишком много попыток, подожди 10 минут"})
             pw = str(data.get("password", ""))
-            if PASS_SHA and SECRET and hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), PASS_SHA):
-                return self.send(200, {"ok": True, "token": token()}, {"Set-Cookie":
-                    f"{COOKIE}={token()}; Max-Age={YEAR}; Path=/; HttpOnly; Secure; SameSite=Lax"})
-            return self.send(403, {"error": "Неверный пароль"})
-        if not self.authed():
+            if p == "/api/register":
+                if len(pw) < 6:
+                    return self.send(400, {"error": "Пароль — минимум 6 символов"})
+                if self.limited("register:" + self.ip(), 5, 3600):
+                    return self.send(429, {"error": "Слишком много новых аккаунтов, попробуй через час"})
+                uid = add_user(pw)
+                if not uid:
+                    return self.send(409, {"error": "Такой пароль уже занят — придумай другой"})
+            else:
+                uid = find_user(pw)
+                if not uid:
+                    return self.send(403, {"error": "Неверный пароль"})
+            t = token(uid)
+            return self.send(200, {"ok": True, "uid": uid, "token": t}, {"Set-Cookie":
+                f"{COOKIE}={t}; Max-Age={YEAR}; Path=/; HttpOnly; Secure; SameSite=Lax"})
+        if p == "/api/logout":
+            return self.send(200, {"ok": True}, {"Set-Cookie": f"{COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax"})
+        uid = self.authed()
+        if not uid:
             return self.send(401, {"error": "auth"})
         if p == "/api/progress":
-            path = os.path.join(STATE, "progress.json")
+            path = progress_path(uid)
             with lock:
                 merged = merge(load_json(path, {}), data)
                 save_json(path, merged)
@@ -235,4 +302,7 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     os.makedirs(STATE, exist_ok=True)
+    if sys.argv[1:2] == ["adduser"]:  # echo 'пароль' | server.py adduser [uid]
+        uid = add_user(sys.stdin.readline().strip(), (sys.argv[2:3] or [None])[0])
+        sys.exit(print(uid) if uid else "пароль уже занят")
     ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("PORT", 8098))), H).serve_forever()

@@ -264,7 +264,7 @@ textarea.inp{min-height:88px;resize:vertical;font-size:16px}
 <script>
 "use strict";
 /* ================= constants & state ================= */
-const LS_P = "lexika-progress-v2", LS_D = "lexika-data-v1-";
+const LS_P = "lexika-progress-v2", LS_D = "lexika-data-v1-", LS_U = "lexika-uid";
 const ASPECTS = {
   komkor: {title:"Комкор", sub:"RU → EN", dirs:[["ru2en","RU → EN"],["en2ru","EN → RU"],["mix","Микс"]], kinds:true, unit:u=>"урок "+u.n},
   econ:   {title:"Экономика", sub:"EN → RU", dirs:[["en2ru","EN → RU"],["ru2en","RU → EN"],["mix","Микс"]], unit:u=>"unit "+u.n},
@@ -1007,7 +1007,8 @@ async function render(){
 function topHtml(){
   const s = streak();
   return `<header class="top"><div class="logo"><i>L</i>Лексика</div><span class="spacer"></span>
-    <span class="chip" title="Дней подряд">🔥 ${s}</span><span class="chip" title="XP сегодня">⭐ ${P.days[today()] || 0}</span></header>`;
+    <span class="chip" title="Дней подряд">🔥 ${s}</span><span class="chip" title="XP сегодня">⭐ ${P.days[today()] || 0}</span>
+    <button class="iconbtn" title="Выйти (у каждого пароля свой прогресс)" onclick="logout()">⎋</button></header>`;
 }
 function tabsHtml(){
   return `<nav class="tabs">${Object.entries(ASPECTS).map(([k,v]) => `<button class="${set.aspect===k?"on":""}" onclick="setAspect('${k}')">${v.title}<small>${v.sub}</small></button>`).join("")}</nav>`;
@@ -1077,17 +1078,36 @@ function showLogin(){
     <div class="sub">Комкор · экономика · Headhunter</div>
     <form onsubmit="event.preventDefault();doLogin()" style="margin-top:18px">
       <input id="pw" class="inp" type="password" placeholder="Пароль" autocomplete="current-password">
-      <div class="err" id="err"></div><button class="btn" style="margin-top:6px">Войти</button></form></div>`;
+      <div class="err" id="err"></div><button class="btn" style="margin-top:6px">Войти</button>
+      <button type="button" class="btn sec" style="margin-top:8px" onclick="doLogin(true)">Я новенький — создать аккаунт с этим паролем</button>
+      <div class="sub" style="margin-top:10px;font-size:13px">У каждого пароля свой прогресс. Запомни свой пароль — восстановить его нельзя.</div></form></div>`;
   $("#pw").focus();
 }
-async function doLogin(){
-  try { const j = await api("login", {method:"POST", body: JSON.stringify({password: $("#pw").value})}); try { if (j.token) localStorage.setItem(LS_T, j.token); } catch(e){} boot(); }
+async function doLogin(isNew){
+  try { const j = await api(isNew ? "register" : "login", {method:"POST", body: JSON.stringify({password: $("#pw").value})}); try { if (j.token) localStorage.setItem(LS_T, j.token); } catch(e){} boot(); }
   catch(e){ $("#err").textContent = e.message; }
 }
 
 /* ================= старт ================= */
+// Прогресс в браузере принадлежит одному аккаунту: другой вошёл — начинаем с чистого листа.
+function forget(){ try { localStorage.removeItem(LS_P); localStorage.removeItem(LS_U); localStorage.removeItem(LS_T); } catch(e){} }
+async function logout(){
+  if (dirty.size) await sync();
+  try { await api("logout", {method:"POST"}); } catch(e){}
+  forget(); location.reload();
+}
 async function boot(){
-  try { await api("me"); } catch(e){ if (e.auth) return showLogin(); }
+  let me;
+  try { me = await api("me"); } catch(e){ if (e.auth) return showLogin(); }
+  if (me && me.uid) {
+    let was = null; try { was = localStorage.getItem(LS_U); } catch(e){}
+    // до аккаунтов в браузере был только прогресс владельца
+    if ((was || "owner") !== me.uid && Object.keys(P.cards).length) {
+      const t = localStorage.getItem(LS_T); forget(); try { localStorage.setItem(LS_U, me.uid); if (t) localStorage.setItem(LS_T, t); } catch(e){}
+      return location.reload();
+    }
+    try { localStorage.setItem(LS_U, me.uid); } catch(e){}
+  }
   try { mergeInto(await api("progress")); saveP(); } catch(e){}
   for (const id of Object.keys(P.cards)) dirty.add(id);
   queueSync();
