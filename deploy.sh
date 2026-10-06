@@ -1,9 +1,11 @@
 #!/bin/sh
-# Сборка словарей из Obsidian (.english) → коммит/пуш в приватный GitHub → выкладка на VPS-88.
+# Сборка словарей из Obsidian (.english) → коммит/пуш в GitHub (фронт на Pages из docs/) → выкладка на VPS-88.
+#   https://l3thily.github.io/lexika/   (фронт; словари и прогресс — с API сервера, за паролем)
 #   https://lexika.88-218-121-40.sslip.io
 set -e
 cd "$(dirname "$0")"
 python3 build_data.py
+rm -rf docs && mkdir docs && cp index.html static/* docs/ && touch docs/.nojekyll
 git add -A
 git commit -qm "${1:-Обновление}" || true
 git push -q origin main

@@ -18,6 +18,7 @@ STATIC = os.environ.get("LEXIKA_STATIC", "")
 MODEL = "claude-haiku-4-5"
 ASPECTS = ("komkor", "econ", "hh")
 COOKIE = "lx"
+ORIGINS = ("https://l3thily.github.io",)  # фронт на GitHub Pages ходит сюда с токеном в заголовке
 YEAR = 365 * 24 * 3600
 
 lock = threading.Lock()
@@ -111,6 +112,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
+        self.cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -121,9 +123,19 @@ class H(BaseHTTPRequestHandler):
             raise ValueError("too big")
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def cors(self):
+        if self.headers.get("Origin") in ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
+            self.send_header("Vary", "Origin")
+
     def authed(self):
+        if not SECRET:
+            return False
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer "):
+            return hmac.compare_digest(auth[7:].strip(), token())
         c = SimpleCookie(self.headers.get("Cookie") or "")
-        return COOKIE in c and SECRET and hmac.compare_digest(c[COOKIE].value, token())
+        return COOKIE in c and hmac.compare_digest(c[COOKIE].value, token())
 
     def ip(self):
         return self.headers.get("X-Real-IP") or self.client_address[0]
@@ -135,6 +147,15 @@ class H(BaseHTTPRequestHandler):
             hits.append(now)
             _hits[key] = hits
         return len(hits) > n
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.cors()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         p = self.path.split("?")[0]
@@ -176,7 +197,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(429, {"error": "Слишком много попыток, подожди 10 минут"})
             pw = str(data.get("password", ""))
             if PASS_SHA and SECRET and hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), PASS_SHA):
-                return self.send(200, {"ok": True}, {"Set-Cookie":
+                return self.send(200, {"ok": True, "token": token()}, {"Set-Cookie":
                     f"{COOKIE}={token()}; Max-Age={YEAR}; Path=/; HttpOnly; Secure; SameSite=Lax"})
             return self.send(403, {"error": "Неверный пароль"})
         if not self.authed():
