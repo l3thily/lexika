@@ -333,7 +333,21 @@ async function loadAspect(a){
 function indexAspect(a, d){
   d.byId = {};
   for (const u of d.units) for (const c of u.cards) { c.u = u.id; c.a = a; d.byId[c.id] = c; }
+  for (const u of d.units) phraseCtx(u);
   DATA[a] = d;
+}
+
+/* writing patterns не учим, а показываем примером к словам урока, у которых нет контекста из учебника */
+const PH_SKIP = new Set(["smth","smb","sb","sth","one's","somebody","something","the","a","an","to","of","for","on","in","with"]);
+function phraseCtx(u){
+  const ph = u.cards.filter(c => c.k === "ph"); if (!ph.length) return;
+  for (const c of u.cards) {
+    if (c.k === "ph" || c.ctx) continue;
+    const toks = c.en.toLowerCase().replace(/\(.*?\)|[….,;!?]/g, " ").split(/\s+/).filter(t => t && !PH_SKIP.has(t));
+    if (!toks.length || toks.join(" ").length < 4) continue;
+    const re = new RegExp("\\b" + toks.map(t => t.replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&")).join("(?:\\s+\\S+){0,2}?\\s+") + "(?:s|es|d|ed|ing)?\\b", "i");
+    for (const p of ph) { const m = p.en.match(re); if (m) { c.ctx = p.en.slice(0, m.index) + "[[" + m[0] + "]]" + p.en.slice(m.index + m[0].length); break; } }
+  }
 }
 
 /* ================= helpers ================= */
@@ -481,8 +495,7 @@ function selCards(a){
   const d = DATA[a]; if (!d) return [];
   const sel = new Set(set.sel[a] || []);
   let cs = d.units.filter(u => sel.has(u.id)).flatMap(u => u.cards);
-  if (a === "komkor" && set.kinds !== "all") cs = cs.filter(c => set.kinds === "ph" ? c.k === "ph" : c.k !== "ph");
-  return cs.filter(c => c.en && meaning(c));
+  return cs.filter(c => c.k !== "ph" && c.en && meaning(c));
 }
 function plan(a){
   const cs = selCards(a), now = Date.now();
@@ -490,8 +503,9 @@ function plan(a){
   const learning = cs.filter(c => { const s = P.cards[c.id]; return s && s.s > 0 && s.s < 3; });
   const fresh = cs.filter(c => !P.cards[c.id] || !P.cards[c.id].s);
   const hard = cs.filter(c => isHard(c.id));
-  const ctx = cs.filter(c => c.ctx && c.k !== "ph");
-  return {cs, due, learning, fresh, hard, ctx};
+  const ctx = cs.filter(c => c.ctx);
+  const phr = (DATA[a].units.filter(u => (set.sel[a] || []).includes(u.id))).flatMap(u => u.cards).filter(c => c.k === "ph");
+  return {cs, due, learning, fresh, hard, ctx, phr};
 }
 
 /* ================= учебная сессия (Учить / Контекст / Экзамен / Трудные) ================= */
@@ -518,7 +532,7 @@ function startSession(mode){
     q = shuffle(pl.cs.slice()).slice(0, 20).map((c,i) => ({id:c.id, ex: canType(c, sides(c)) && i % 3 !== 2 ? "type" : "mc", exam:true}));
     if (!q.length) return toast("Выбери хотя бы один юнит");
   } else if (mode === "hard") {
-    const hard = pl.hard.length ? pl.hard : Object.values(DATA[a].byId).filter(c => isHard(c.id));
+    const hard = pl.hard.length ? pl.hard : Object.values(DATA[a].byId).filter(c => c.k !== "ph" && isHard(c.id));
     q = shuffle(hard.slice()).slice(0, 12).flatMap(c => [{id:c.id, ex:"intro", hard:true}]);
     if (!q.length) return toast("Трудных слов пока нет — это те, где ошибся 2+ раза");
     q = q.concat(q.map(x => ({id:x.id, ex:"prod"})));
@@ -968,7 +982,7 @@ async function render(){
   const d = DATA[a], sel = new Set(set.sel[a] || []), pl = plan(a);
   const reviewN = pl.due.length + pl.learning.length, newN = Math.min(Math.max(0, set.newN - pl.learning.length), pl.fresh.length);
   const xp = P.days[today()] || 0, [hTitle, hLead] = greeting();
-  const known = Object.values(d.byId).filter(c => status(c.id) === "known").length;
+  const words = Object.values(d.byId).filter(c => c.k !== "ph"), known = words.filter(c => status(c.id) === "known").length;
   const selNames = d.units.filter(u => sel.has(u.id)).map(u => ASPECTS[a].unit(u));
   const learnMeta = reviewN + newN ? [reviewN ? `${reviewN} повторить` : "", newN ? `${newN} ${plural(newN,"новое","новых","новых")}` : ""].filter(Boolean).join(" · ") : (pl.cs.length ? "всё повторено ✓" : "выбери юниты ниже");
   app.innerHTML = topHtml() + `
@@ -989,12 +1003,12 @@ async function render(){
     <button class="mode m-pairs" onclick="startPairs()"><span class="ic">🧩</span><span class="t">Пары</span><span class="d">Соедини слова с переводом — 3 раунда на время</span><span class="m">${set.best["pairs_"+a] ? `лучшее ${set.best["pairs_"+a]} с` : "без рекорда"}</span></button>
     <button class="mode m-exam" onclick="startSession('exam')"><span class="ic">📝</span><span class="t">Экзамен</span><span class="d">20 вопросов без подсказок, оценка в конце</span><span class="m">ошибки → в повтор</span></button>
     <button class="mode m-hard" onclick="startSession('hard')"><span class="ic">🧠</span><span class="t">Трудные</span><span class="d">Слова, где ошибался, — с ИИ-ассоциациями</span><span class="m">${pl.hard.length} ${plural(pl.hard.length,"слово","слова","слов")}</span></button>
-    <button class="mode m-dict" onclick="openSearch()"><span class="ic">🔎</span><span class="t">Словарь</span><span class="d">Поиск по всем словам аспекта</span><span class="m">выучено ${known} из ${Object.keys(d.byId).length}</span></button>
+    <button class="mode m-dict" onclick="openSearch()"><span class="ic">🔎</span><span class="t">Словарь</span><span class="d">Поиск по всем словам аспекта</span><span class="m">выучено ${known} из ${words.length}</span></button>
+    ${pl.phr.length ? `<button class="mode m-dict" onclick="openPhrases()"><span class="ic">✉️</span><span class="t">Фразы для писем</span><span class="d">Writing patterns — шпаргалка, учить не надо. Встречаются и как примеры к словам</span><span class="m">${pl.phr.length} ${plural(pl.phr.length,"фраза","фразы","фраз")}</span></button>` : ""}
   </div>
   <h2 class="sec">Настройки</h2>
   <div class="panel opts">
     <div><span class="optlbl">Направление</span><div class="seg">${ASPECTS[a].dirs.map(([k,l]) => `<button class="${dirOf(a)===k?"on":""}" onclick="setDir('${k}')">${l}</button>`).join("")}</div></div>
-    ${ASPECTS[a].kinds ? `<div><span class="optlbl">Что учить</span><div class="seg">${[["all","Всё"],["w","Слова"],["ph","Фразы"]].map(([k,l]) => `<button class="${set.kinds===k?"on":""}" onclick="setKinds('${k}')">${l}</button>`).join("")}</div></div>` : ""}
     <div><span class="optlbl">Новых за раунд</span><div class="seg">${[5,10,20,30].map(n => `<button class="${set.newN===n?"on":""}" onclick="setNew(${n})">${n}</button>`).join("")}</div></div>
     <div><span class="optlbl">Цель в день</span><div class="seg">${[100,200,400].map(n => `<button class="${set.goal===n?"on":""}" onclick="setGoal(${n})">${n} XP</button>`).join("")}</div></div>
   </div>
@@ -1014,7 +1028,7 @@ function tabsHtml(){
   return `<nav class="tabs">${Object.entries(ASPECTS).map(([k,v]) => `<button class="${set.aspect===k?"on":""}" onclick="setAspect('${k}')">${v.title}<small>${v.sub}</small></button>`).join("")}</nav>`;
 }
 function unitRow(u, on){
-  const cs = u.cards.filter(c => set.aspect !== "komkor" || set.kinds === "all" || (set.kinds === "ph" ? c.k === "ph" : c.k !== "ph"));
+  const cs = u.cards.filter(c => c.k !== "ph");
   const n = cs.length || 1, now = Date.now();
   let k = 0, w = 0, due = 0;
   for (const c of cs) { const s = status(c.id); if (s === "known") k++; else if (s !== "new") w++; const p = P.cards[c.id]; if (p && p.s === 3 && p.due <= now) due++; }
@@ -1047,7 +1061,7 @@ function exportCsv(){
 /* ================= словарь ================= */
 function wordRow(c){
   const s = status(c.id), lbl = isHard(c.id) ? ["h","трудное"] : {new:["n","новое"], learning:["l","учу"], review:["l","повтор"], known:["k","выучено"]}[s];
-  return `<div class="wl"><span class="w">${esc(c.en)}</span><button class="say" style="width:26px;height:26px;font-size:13px" onclick="say(${sayArg(c.en)})">🔊</button><span class="st ${lbl[0]}">${lbl[1]}</span>
+  return `<div class="wl"><span class="w">${esc(c.en)}</span><button class="say" style="width:26px;height:26px;font-size:13px" onclick="say(${sayArg(c.en)})">🔊</button>${c.k === "ph" ? "" : `<span class="st ${lbl[0]}">${lbl[1]}</span>`}
     <div class="r">${esc(c.a === "hh" ? [c.def, c.ru].filter(Boolean).join(" · ") : c.ru)}${c.note ? ` <i>(${esc(c.note)})</i>` : ""}</div>
     ${c.ctx ? `<div class="c">${ctxHtml(c.ctx,"mark")}</div>` : ""}</div>`;
 }
@@ -1056,6 +1070,15 @@ function openUnit(uid){
   let g = null, rows = "";
   for (const c of u.cards) { if (c.g !== g) { g = c.g; rows += `<div class="grp">${esc(g || (c.k==="ph"?"Фразы":"Слова"))}</div>`; } rows += wordRow(c); }
   modal(esc(u.title), rows);
+}
+function openPhrases(){
+  const a = set.aspect, sel = new Set(set.sel[a] || []);
+  let rows = "";
+  for (const u of DATA[a].units.filter(u => sel.has(u.id))) {
+    const ph = u.cards.filter(c => c.k === "ph"); if (!ph.length) continue;
+    rows += `<div class="grp">${esc(ASPECTS[a].unit(u) + " · " + u.title)}</div>` + ph.map(wordRow).join("");
+  }
+  modal("Фразы для писем", rows);
 }
 function openSearch(){
   modal("Словарь · " + ASPECTS[set.aspect].title, `<input class="search" id="q" placeholder="слово по-английски или по-русски" oninput="doSearch()"><div id="sr" style="margin-top:8px"></div>`);
